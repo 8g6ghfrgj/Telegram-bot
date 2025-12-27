@@ -3,11 +3,7 @@ import re
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -18,7 +14,7 @@ from telegram.ext import (
 )
 
 # ===============================
-# إعدادات أساسية
+# إعدادات
 # ===============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -29,33 +25,20 @@ TIMEOUT = 4
 MAX_WORKERS = 20
 
 # ===============================
-# أدوات مساعدة
+# أدوات عامة
 # ===============================
-def clean_text(text: str) -> str:
-    return (
-        text.replace("*", "")
-        .replace("(", "")
-        .replace(")", "")
-        .replace("[", "")
-        .replace("]", "")
-        .strip()
-    )
-
-
 def extract_links(text: str):
-    return re.findall(r'https?://t\.me/[^\s]+', text)
+    return re.findall(r'https?://[^\s]+', text)
 
 
 def normalize(url: str) -> str:
-    return url.strip().rstrip("/").lower()
+    url = url.strip()
+    url = re.split(r'[^\w:/?=&.+-]', url)[0]
+    return url.lower().rstrip("/")
 
 
-def is_bot(url: str) -> bool:
-    return url.split("/")[-1].endswith("bot")
-
-
-def is_group_join(url: str) -> bool:
-    return "joinchat" in url or "+" in url
+def strip_query(url: str) -> str:
+    return url.split("?")[0]
 
 
 def estimate_time(count: int) -> str:
@@ -65,15 +48,37 @@ def estimate_time(count: int) -> str:
 
 def is_alive(url: str) -> bool:
     try:
-        r = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=TIMEOUT,
-            allow_redirects=True
-        )
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT, allow_redirects=True)
         return r.status_code < 400
     except:
         return False
+
+
+# ===============================
+# Telegram rules
+# ===============================
+def is_telegram(url: str) -> bool:
+    return "t.me/" in url or "telegram.me/" in url
+
+
+def tg_is_bot(url: str) -> bool:
+    name = url.split("/")[-1].split("?")[0]
+    return name.endswith("bot")
+
+
+def tg_is_message(url: str) -> bool:
+    return bool(re.search(r'/\d+$', url) or "/c/" in url)
+
+
+def tg_is_group(url: str) -> bool:
+    return "joinchat" in url or "+" in url
+
+
+# ===============================
+# WhatsApp rules
+# ===============================
+def is_whatsapp(url: str) -> bool:
+    return "chat.whatsapp.com" in url or "wa.me/" in url
 
 
 # ===============================
@@ -81,11 +86,11 @@ def is_alive(url: str) -> bool:
 # ===============================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 بوت تصفية وترتيب روابط تيليجرام\n\n"
+        "🤖 بوت ترتيب وتصفية جميع الروابط\n\n"
         "📄 أرسل ملف TXT\n\n"
-        "• تقسيم احترافي\n"
+        "• Telegram / WhatsApp / Other\n"
+        "• تصنيف احترافي\n"
         "• بدون تكرار\n"
-        "• بدون تداخل\n"
         "• زر لتنظيف الروابط الميتة"
     )
 
@@ -95,7 +100,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===============================
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
-
     if not doc.file_name.lower().endswith(".txt"):
         await update.message.reply_text("❌ أرسل ملف TXT فقط")
         return
@@ -103,55 +107,67 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⚡ جاري تحليل وترتيب الروابط...")
 
     file = await doc.get_file()
-    lines = (await file.download_as_bytearray()).decode(
-        "utf-8", errors="ignore"
-    ).splitlines()
+    lines = (await file.download_as_bytearray()).decode("utf-8", errors="ignore").splitlines()
 
-    channels, groups, bots, messages = set(), set(), set(), set()
-    used_links = set()
-    seen_msg_groups = set()
+    tg_channels, tg_groups, tg_bots, tg_messages = set(), set(), set(), set()
+    wa_groups, wa_numbers = set(), set()
+    other_links = set()
+    seen = set()
 
     for line in lines:
-        line = clean_text(line)
-        if "t.me/" not in line:
-            continue
-
         for raw in extract_links(line):
             link = normalize(raw)
-
-            if link in used_links:
+            if not link.startswith("http"):
                 continue
 
-            # روابط رسائل
-            if "/c/" in link:
-                gid = re.search(r'/c/(\d+)', link)
-                if gid and gid.group(1) not in seen_msg_groups:
-                    messages.add(link)
-                    seen_msg_groups.add(gid.group(1))
-                    used_links.add(link)
+            base = strip_query(link)
+            if base in seen:
                 continue
 
-            # بوتات
-            if is_bot(link):
-                bots.add(link)
-                used_links.add(link)
+            # ===== Telegram =====
+            if is_telegram(link):
+
+                if tg_is_message(link):
+                    tg_messages.add(link)
+                    seen.add(base)
+                    continue
+
+                if tg_is_bot(link):
+                    tg_bots.add(base)
+                    seen.add(base)
+                    continue
+
+                if tg_is_group(link):
+                    tg_groups.add(link)
+                    seen.add(base)
+                    continue
+
+                tg_channels.add(link)
+                seen.add(base)
                 continue
 
-            # مجموعات
-            if is_group_join(link):
-                groups.add(link)
-                used_links.add(link)
+            # ===== WhatsApp =====
+            if is_whatsapp(link):
+                if "chat.whatsapp.com" in link:
+                    wa_groups.add(link)
+                else:
+                    wa_numbers.add(link)
+
+                seen.add(base)
                 continue
 
-            # قنوات
-            channels.add(link)
-            used_links.add(link)
+            # ===== Other =====
+            other_links.add(link)
+            seen.add(base)
 
     files = {
-        "channels.txt": ("📢 روابط القنوات", channels),
-        "groups.txt": ("👥 روابط المجموعات", groups),
-        "bots.txt": ("🤖 روابط البوتات", bots),
-        "messages.txt": ("📨 روابط الرسائل", messages),
+        "tg_channels.txt": ("📢 Telegram Channels", tg_channels),
+        "tg_groups.txt": ("👥 Telegram Groups", tg_groups),
+        "tg_bots.txt": ("🤖 Telegram Bots", tg_bots),
+        "tg_messages.txt": ("📨 Telegram Messages", tg_messages),
+        "wa_groups.txt": ("👥 WhatsApp Groups", wa_groups),
+        "wa_numbers.txt": ("📱 WhatsApp Numbers", wa_numbers),
+        "other_links.txt": ("🌐 Other Links", other_links),
     }
 
     for fname, (title, data) in files.items():
@@ -163,10 +179,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f.write(link + "\n")
 
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(
-                "🧹 تصفية الروابط الميتة",
-                callback_data=f"clean::{fname}"
-            )]
+            [InlineKeyboardButton("🧹 تصفية الروابط الميتة", callback_data=f"clean::{fname}")]
         ])
 
         await update.message.reply_document(
@@ -175,11 +188,11 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard
         )
 
-    await update.message.reply_text("✅ تم التقسيم بنجاح")
+    await update.message.reply_text("✅ تم التقسيم والتنظيف بالكامل")
 
 
 # ===============================
-# زر تنظيف الروابط الميتة
+# تصفية الروابط الميتة
 # ===============================
 async def clean_dead_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -188,10 +201,10 @@ async def clean_dead_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fname = query.data.split("::")[1]
 
     with open(fname, "r", encoding="utf-8") as f:
-        links = list(set(normalize(l) for l in f if l.strip()))
+        links = list(set(l.strip() for l in f if l.strip()))
 
     await query.edit_message_caption(
-        f"🧹 جاري تصفية {len(links)} رابط\n{estimate_time(len(links))}"
+        f"🧹 تصفية {len(links)} رابط\n{estimate_time(len(links))}"
     )
 
     start_time = time.time()
@@ -220,7 +233,7 @@ async def clean_dead_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ===============================
-# تشغيل البوت
+# تشغيل
 # ===============================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
