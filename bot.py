@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from telegram import (
@@ -17,20 +18,20 @@ from telegram.ext import (
 )
 
 # ===============================
-# إعدادات
+# إعدادات أساسية
 # ===============================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
-TIMEOUT = 3
-MAX_WORKERS = 20  # مناسب لـ Render
+TIMEOUT = 4
+MAX_WORKERS = 20
 
 # ===============================
-# أدوات ترتيب فقط (بدون شبكة)
+# أدوات مساعدة
 # ===============================
-def clean_link(text: str) -> str:
+def clean_text(text: str) -> str:
     return (
         text.replace("*", "")
         .replace("(", "")
@@ -41,24 +42,30 @@ def clean_link(text: str) -> str:
     )
 
 
-def extract_links(line: str):
-    return re.findall(r'https?://t\.me/[^\s]+', line)
+def extract_links(text: str):
+    return re.findall(r'https?://t\.me/[^\s]+', text)
 
 
-def is_bot(link: str) -> bool:
-    return link.rstrip("/").split("/")[-1].lower().endswith("bot")
+def normalize(url: str) -> str:
+    return url.strip().rstrip("/").lower()
 
 
-def is_group_join(link: str) -> bool:
-    return "joinchat" in link or "+" in link
+def is_bot(url: str) -> bool:
+    return url.split("/")[-1].endswith("bot")
 
 
-# ===============================
-# فحص الروابط الميتة (يُستخدم فقط مع الزر)
-# ===============================
-def is_alive_fast(url: str) -> bool:
+def is_group_join(url: str) -> bool:
+    return "joinchat" in url or "+" in url
+
+
+def estimate_time(count: int) -> str:
+    sec = max(1, int((count * TIMEOUT) / MAX_WORKERS))
+    return f"⏳ تقريبًا {sec} ثانية"
+
+
+def is_alive(url: str) -> bool:
     try:
-        r = requests.head(
+        r = requests.get(
             url,
             headers=HEADERS,
             timeout=TIMEOUT,
@@ -74,37 +81,46 @@ def is_alive_fast(url: str) -> bool:
 # ===============================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 بوت تصفية روابط تيليجرام\n\n"
+        "🤖 بوت تصفية وترتيب روابط تيليجرام\n\n"
         "📄 أرسل ملف TXT\n\n"
-        "• سأعطيك الملفات فورًا\n"
-        "• بدون فحص روابط\n"
-        "• بعدها زر لتصفية الروابط الميتة لكل ملف"
+        "• تقسيم احترافي\n"
+        "• بدون تكرار\n"
+        "• بدون تداخل\n"
+        "• زر لتنظيف الروابط الميتة"
     )
 
 
 # ===============================
-# التصفية السريعة (بدون شبكة)
+# معالجة الملف
 # ===============================
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
+
     if not doc.file_name.lower().endswith(".txt"):
         await update.message.reply_text("❌ أرسل ملف TXT فقط")
         return
 
-    await update.message.reply_text("⚡ جاري ترتيب الروابط...")
+    await update.message.reply_text("⚡ جاري تحليل وترتيب الروابط...")
 
     file = await doc.get_file()
-    lines = (await file.download_as_bytearray()).decode("utf-8", errors="ignore").splitlines()
+    lines = (await file.download_as_bytearray()).decode(
+        "utf-8", errors="ignore"
+    ).splitlines()
 
     channels, groups, bots, messages = set(), set(), set(), set()
+    used_links = set()
     seen_msg_groups = set()
 
     for line in lines:
-        line = clean_link(line)
+        line = clean_text(line)
         if "t.me/" not in line:
             continue
 
-        for link in extract_links(line):
+        for raw in extract_links(line):
+            link = normalize(raw)
+
+            if link in used_links:
+                continue
 
             # روابط رسائل
             if "/c/" in link:
@@ -112,51 +128,58 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if gid and gid.group(1) not in seen_msg_groups:
                     messages.add(link)
                     seen_msg_groups.add(gid.group(1))
+                    used_links.add(link)
                 continue
 
             # بوتات
             if is_bot(link):
                 bots.add(link)
+                used_links.add(link)
                 continue
 
-            # مجموعات انضمام
+            # مجموعات
             if is_group_join(link):
                 groups.add(link)
+                used_links.add(link)
                 continue
 
-            # الباقي قنوات
+            # قنوات
             channels.add(link)
+            used_links.add(link)
 
     files = {
         "channels.txt": ("📢 روابط القنوات", channels),
         "groups.txt": ("👥 روابط المجموعات", groups),
-        "messages.txt": ("📨 روابط الرسائل", messages),
         "bots.txt": ("🤖 روابط البوتات", bots),
+        "messages.txt": ("📨 روابط الرسائل", messages),
     }
 
     for fname, (title, data) in files.items():
+        if not data:
+            continue
+
         with open(fname, "w", encoding="utf-8") as f:
             for link in sorted(data):
                 f.write(link + "\n")
 
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🧹 تصفية الروابط الميتة", callback_data=f"clean::{fname}")]
+            [InlineKeyboardButton(
+                "🧹 تصفية الروابط الميتة",
+                callback_data=f"clean::{fname}"
+            )]
         ])
 
         await update.message.reply_document(
             open(fname, "rb"),
-            caption=title,
+            caption=f"{title}\n📊 العدد: {len(data)}",
             reply_markup=keyboard
         )
 
-        # حفظ الملف للزر
-        context.bot_data[fname] = fname
-
-    await update.message.reply_text("✅ تم إرسال الملفات فورًا")
+    await update.message.reply_text("✅ تم التقسيم بنجاح")
 
 
 # ===============================
-# زر تصفية الروابط الميتة (هنا فقط يوجد شبكة)
+# زر تنظيف الروابط الميتة
 # ===============================
 async def clean_dead_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -164,41 +187,49 @@ async def clean_dead_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     fname = query.data.split("::")[1]
 
-    await query.edit_message_caption("🧹 جاري تصفية الروابط الميتة...")
-
     with open(fname, "r", encoding="utf-8") as f:
-        links = [l.strip() for l in f if l.strip()]
+        links = list(set(normalize(l) for l in f if l.strip()))
 
+    await query.edit_message_caption(
+        f"🧹 جاري تصفية {len(links)} رابط\n{estimate_time(len(links))}"
+    )
+
+    start_time = time.time()
     alive = []
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(is_alive_fast, url): url for url in links}
+        futures = {executor.submit(is_alive, url): url for url in links}
         for future in as_completed(futures):
             if future.result():
                 alive.append(futures[future])
 
-    alive_file = f"alive_{fname}"
-    with open(alive_file, "w", encoding="utf-8") as f:
+    with open(fname, "w", encoding="utf-8") as f:
         for link in sorted(alive):
             f.write(link + "\n")
 
-    await query.message.reply_document(
-        open(alive_file, "rb"),
-        caption="✅ الروابط النشطة فقط"
-    )
+    duration = int(time.time() - start_time)
 
-    os.remove(alive_file)
+    await query.message.reply_document(
+        open(fname, "rb"),
+        caption=(
+            "✅ تم تنظيف الملف\n"
+            f"📊 المتبقي: {len(alive)} رابط نشط\n"
+            f"⏱ الوقت: {duration} ثانية"
+        )
+    )
 
 
 # ===============================
-# تشغيل
+# تشغيل البوت
 # ===============================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(CallbackQueryHandler(clean_dead_links, pattern=r"^clean::"))
-    print("🤖 Bot running (FAST correct flow)...")
+
+    print("🤖 Bot running...")
     app.run_polling()
 
 
