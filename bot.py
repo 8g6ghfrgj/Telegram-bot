@@ -21,8 +21,8 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
-TIMEOUT = 4
-MAX_WORKERS = 20
+TIMEOUT = 5
+MAX_WORKERS = 15
 
 # ===============================
 # أدوات عامة
@@ -46,21 +46,20 @@ def estimate_time(count: int) -> str:
     return f"⏳ تقريبًا {sec} ثانية"
 
 
-def is_alive(url: str) -> bool:
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT, allow_redirects=True)
-        return r.status_code < 400
-    except:
-        return False
-
-
 # ===============================
-# Telegram rules
+# تحديد المنصات
 # ===============================
 def is_telegram(url: str) -> bool:
     return "t.me/" in url or "telegram.me/" in url
 
 
+def is_whatsapp(url: str) -> bool:
+    return "chat.whatsapp.com" in url or "wa.me/" in url
+
+
+# ===============================
+# Telegram rules
+# ===============================
 def tg_is_bot(url: str) -> bool:
     name = url.split("/")[-1].split("?")[0]
     return name.endswith("bot")
@@ -75,10 +74,49 @@ def tg_is_group(url: str) -> bool:
 
 
 # ===============================
-# WhatsApp rules
+# فحص حقيقي للروابط
 # ===============================
-def is_whatsapp(url: str) -> bool:
-    return "chat.whatsapp.com" in url or "wa.me/" in url
+def is_alive(url: str) -> bool:
+    try:
+        r = requests.get(
+            url,
+            headers=HEADERS,
+            timeout=TIMEOUT,
+            allow_redirects=True
+        )
+
+        if r.status_code >= 400:
+            return False
+
+        text = r.text.lower()
+
+        # Telegram
+        if is_telegram(url):
+            dead_phrases = [
+                "if you have telegram",
+                "join telegram",
+                "sorry, this link is invalid",
+                "this channel is private",
+                "username not found",
+                "page not found"
+            ]
+            if any(p in text for p in dead_phrases):
+                return False
+
+        # WhatsApp
+        if is_whatsapp(url):
+            dead_phrases = [
+                "invite link reset",
+                "this group no longer exists",
+                "this link is no longer valid"
+            ]
+            if any(p in text for p in dead_phrases):
+                return False
+
+        return True
+
+    except:
+        return False
 
 
 # ===============================
@@ -86,12 +124,11 @@ def is_whatsapp(url: str) -> bool:
 # ===============================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 بوت ترتيب وتصفية جميع الروابط\n\n"
-        "📄 أرسل ملف TXT\n\n"
+        "🤖 بوت ترتيب وتصفية الروابط (نسخة نهائية)\n\n"
+        "📄 أرسل ملف TXT\n"
         "• Telegram / WhatsApp / Other\n"
-        "• تصنيف احترافي\n"
-        "• بدون تكرار\n"
-        "• زر لتنظيف الروابط الميتة"
+        "• تصنيف صحيح\n"
+        "• تصفية روابط ميتة حقيقية"
     )
 
 
@@ -124,7 +161,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if base in seen:
                 continue
 
-            # ===== Telegram =====
+            # Telegram
             if is_telegram(link):
 
                 if tg_is_message(link):
@@ -146,7 +183,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 seen.add(base)
                 continue
 
-            # ===== WhatsApp =====
+            # WhatsApp
             if is_whatsapp(link):
                 if "chat.whatsapp.com" in link:
                     wa_groups.add(link)
@@ -156,7 +193,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 seen.add(base)
                 continue
 
-            # ===== Other =====
+            # Other
             other_links.add(link)
             seen.add(base)
 
@@ -188,7 +225,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=keyboard
         )
 
-    await update.message.reply_text("✅ تم التقسيم والتنظيف بالكامل")
+    await update.message.reply_text("✅ تم التقسيم بنجاح")
 
 
 # ===============================
@@ -225,7 +262,7 @@ async def clean_dead_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_document(
         open(fname, "rb"),
         caption=(
-            "✅ تم تنظيف الملف\n"
+            "✅ تم تنظيف الملف فعليًا\n"
             f"📊 المتبقي: {len(alive)} رابط نشط\n"
             f"⏱ الوقت: {duration} ثانية"
         )
@@ -237,12 +274,10 @@ async def clean_dead_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===============================
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(CallbackQueryHandler(clean_dead_links, pattern=r"^clean::"))
-
-    print("🤖 Bot running...")
+    print("🤖 Bot running (FINAL)...")
     app.run_polling()
 
 
